@@ -55,3 +55,34 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
+
+  release:
+    # Workflow artifacts (actions/upload-artifact) require an authenticated
+    # request to download -- fine inside Actions, useless for the
+    # production server pulling binaries down with a plain curl. Publishing
+    # them as release assets under a stable "latest" tag instead gives
+    # public, no-auth URLs the server (or anyone) can just curl:
+    #   https://github.com/orugu/afp-client/releases/download/latest/FileSortingUploader-<os>
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten + rename for release (avoid same-basename collisions)
+        run: |
+          mkdir -p release
+          cp dist/FileSortingUploader-linux/FileSortingUploader release/FileSortingUploader-linux
+          cp dist/FileSortingUploader-macos/FileSortingUploader release/FileSortingUploader-macos
+          cp dist/FileSortingUploader-windows/FileSortingUploader.exe release/FileSortingUploader-windows.exe
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          make_latest: true
+          files: release/*
