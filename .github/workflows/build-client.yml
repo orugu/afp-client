@@ -1,0 +1,57 @@
+name: Build client binaries
+
+# Matrix build of the cross-platform desktop client (src/file_sorting_client/gui.py)
+# on all three target OSes. PyInstaller can't cross-compile (see
+# build/README.md), so each OS genuinely needs its own runner -- that's
+# what this workflow buys over building locally.
+on:
+  push:
+    paths:
+      - "src/**"
+      - "build/**"
+      - ".github/workflows/build-client.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: build/build_linux.sh
+            artifact_path: linux/FileSortingUploader
+            artifact_name: FileSortingUploader-linux
+          - os: macos-latest
+            script: build/build_macos.sh
+            artifact_path: macos/FileSortingUploader
+            artifact_name: FileSortingUploader-macos
+          - os: windows-latest
+            script: build/build_windows.ps1
+            artifact_path: windows/FileSortingUploader.exe
+            artifact_name: FileSortingUploader-windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install Tk (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Build (bash)
+        if: matrix.os != 'windows-latest'
+        run: bash ${{ matrix.script }}
+
+      - name: Build (PowerShell)
+        if: matrix.os == 'windows-latest'
+        run: ${{ matrix.script }}
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}

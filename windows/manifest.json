@@ -1,0 +1,14 @@
+{
+  "version": "0.1.3",
+  "files": [
+    "install.ps1",
+    "install-gui.ps1",
+    "install.bat",
+    "start-mount.ps1",
+    "sync-local-folder.ps1",
+    "stop-mount.ps1",
+    "cleanup-cache.ps1",
+    "update-client.ps1",
+    "lib/Common.ps1"
+  ]
+}
