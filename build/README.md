@@ -58,11 +58,15 @@ the same manifest format `windows/manifest.json` already uses.
 ## Known limitations
 
 - **macOS Gatekeeper**: the built binary is unsigned (no Apple Developer ID
-  configured for this project). Users will see "cannot be opened because
-  the developer cannot be verified" the first time — right-click → Open, or
-  `xattr -d com.apple.quarantine FileSortingUploader`, works around it. Actual
-  codesigning + notarization needs an Apple Developer account's certificate,
-  which isn't available here.
+  configured for this project). Users will see "Apple could not verify
+  ... is free of malware" the first time. On current macOS (Sequoia+) the
+  classic right-click → Open trick doesn't reliably surface an Open option
+  for this exact dialog anymore -- the two workarounds that do work:
+  - `xattr -d com.apple.quarantine FileSortingUploader`, then reopen, or
+  - System Settings → Privacy & Security → scroll to the bottom → "Open
+    Anyway" next to the blocked-app notice.
+  Actual codesigning + notarization needs an Apple Developer account's
+  certificate, which isn't available here.
 - **Linux**: no distro packaging (no `.deb`/`.rpm`/AppImage) — just a bare
   onefile ELF binary. `chmod +x` and run.
 - **Windows**: unsigned `.exe` will likely trigger a SmartScreen warning on
