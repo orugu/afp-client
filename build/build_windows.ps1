@@ -36,7 +36,7 @@ try {
         -Destination (Join-Path $TargetDir "FileSortingUploader.exe") `
         -Force
 
-    python (Join-Path $BuildDir "update_manifest.py") (Join-Path $TargetDir "manifest.json") "FileSortingUploader.exe"
+    python (Join-Path $BuildDir "update_manifest.py") (Join-Path $TargetDir "uploader-manifest.json") "FileSortingUploader.exe"
 
     Write-Host "Built FileSortingUploader.exe"
 }

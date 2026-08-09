@@ -34,6 +34,6 @@ mkdir -p "$TARGET_DIR"
 cp "$OUT_DIR/FileSortingUploader" "$TARGET_DIR/FileSortingUploader"
 chmod +x "$TARGET_DIR/FileSortingUploader"
 
-python3 "$CLIENT_ROOT/build/update_manifest.py" "$TARGET_DIR/manifest.json" FileSortingUploader
+python3 "$CLIENT_ROOT/build/update_manifest.py" "$TARGET_DIR/uploader-manifest.json" FileSortingUploader
 
 echo "Built $TARGET_DIR/FileSortingUploader"

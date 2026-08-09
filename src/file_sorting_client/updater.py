@@ -78,7 +78,14 @@ def check_for_update(base_url: str, timeout: float = 10.0) -> Optional[UpdateInf
     app_base_url = base_url.rstrip("/")
     if app_base_url.endswith("/api"):
         app_base_url = app_base_url[: -len("/api")]
-    manifest_url = f"{app_base_url}/downloads/{os_name}/manifest.json"
+    # A dedicated filename, not the pre-existing manifest.json -- on
+    # Windows that file already tracks a different, independently-versioned
+    # thing (the rclone/WinFsp install-pipeline scripts, see
+    # windows/manifest.json + update-client.ps1). Reusing it here would
+    # mean this app's version bumps get entangled with that pipeline's, or
+    # worse, checking a "files" list that was never told this app's binary
+    # exists and permanently reporting "no update" for Windows.
+    manifest_url = f"{app_base_url}/downloads/{os_name}/uploader-manifest.json"
     try:
         response = httpx.get(manifest_url, timeout=timeout)
         response.raise_for_status()

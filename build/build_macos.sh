@@ -59,6 +59,6 @@ ln -s /Applications "$STAGING_DIR/Applications"
 
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_PATH"
 
-python3 "$CLIENT_ROOT/build/update_manifest.py" "$TARGET_DIR/manifest.json" "$APP_NAME.dmg"
+python3 "$CLIENT_ROOT/build/update_manifest.py" "$TARGET_DIR/uploader-manifest.json" "$APP_NAME.dmg"
 
 echo "Built $DMG_PATH"
