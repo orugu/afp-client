@@ -7,8 +7,16 @@ per OS with PyInstaller:
 | OS      | Script                     | Output                        |
 |---------|-----------------------------|--------------------------------|
 | Linux   | `build_linux.sh`            | `linux/FileSortingUploader` |
-| macOS   | `build_macos.sh`            | `macos/FileSortingUploader` |
+| macOS   | `build_macos.sh`            | `macos/FileSortingUploader.dmg` |
 | Windows | `build_windows.ps1`         | `windows/FileSortingUploader.exe` |
+
+macOS ships as a `.dmg` (not a bare binary): PyInstaller's `--windowed` flag
+produces a real `.app` bundle on macOS, and Finder needs that bundle -- not
+the raw executable inside it -- to recognize the download as an
+application. A bare binary double-clicked in Finder gets treated as an
+unrecognized document instead (surfaces as a "Unicode (UTF-8) text encoding"
+error, since Finder tries to open it as text). The `.dmg` mounts and offers
+the standard drag-the-.app-onto-Applications flow.
 
 This repo (`orugu/afp-client`) is the client only -- the server side
 (`auto-file-processor`) lives in a separate, non-public project and serves
@@ -62,7 +70,8 @@ the same manifest format `windows/manifest.json` already uses.
   ... is free of malware" the first time. On current macOS (Sequoia+) the
   classic right-click → Open trick doesn't reliably surface an Open option
   for this exact dialog anymore -- the two workarounds that do work:
-  - `xattr -d com.apple.quarantine FileSortingUploader`, then reopen, or
+  - `xattr -d com.apple.quarantine /Applications/FileSortingUploader.app`
+    (after dragging it there from the mounted .dmg), then reopen, or
   - System Settings → Privacy & Security → scroll to the bottom → "Open
     Anyway" next to the blocked-app notice.
   Actual codesigning + notarization needs an Apple Developer account's
