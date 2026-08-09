@@ -18,7 +18,10 @@ from file_sorting_client.display import (
     print_json,
     print_worker_status,
 )
+from file_sorting_client import __version__, autostart
 from file_sorting_client.download_manager import download_tree
+from file_sorting_client.sync_manager import SyncLoop, run_sync
+from file_sorting_client.updater import apply_update_linux, check_for_update
 from file_sorting_client.upload_watcher import UploadWatcher
 
 app = typer.Typer(
@@ -31,9 +34,11 @@ windows_app = typer.Typer(help="Windows sync client commands")
 credentials_app = typer.Typer(help="WebDAV credential commands")
 downloads_app = typer.Typer(help="Download manifest commands")
 mount_app = typer.Typer(help="Local drive mount commands (Windows only)")
+autostart_app = typer.Typer(help="Launch-on-login commands")
 
 app.add_typer(worker_app, name="worker")
 app.add_typer(windows_app, name="windows")
+app.add_typer(autostart_app, name="autostart")
 windows_app.add_typer(credentials_app, name="credentials")
 windows_app.add_typer(downloads_app, name="downloads")
 windows_app.add_typer(mount_app, name="mount")
@@ -388,6 +393,115 @@ def download(
     failed = len(events) - ok
     console.print(f"[green]{ok} downloaded[/green]" + (f", [red]{failed} failed[/red]" if failed else ""))
     console.print(f"Saved to {output_dir.resolve()}")
+
+
+@app.command("sync")
+def sync(
+    local_dir: Annotated[Path, typer.Argument(help="Local folder to keep in sync with the server")],
+    remote_path: Annotated[
+        str, typer.Option("--remote", help="Server-side folder to sync against (default: everything)")
+    ] = "",
+    watch: Annotated[
+        bool, typer.Option("--watch", help="Keep syncing in the background instead of running once")
+    ] = False,
+    interval: Annotated[
+        float, typer.Option("--interval", min=1.0, help="--watch poll interval in seconds")
+    ] = 15.0,
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", min=1, max=32, help="Concurrent transfers in flight")
+    ] = 4,
+    base_url: CommonBaseUrl = None,
+    token: CommonToken = None,
+    config_file: CommonConfig = None,
+) -> None:
+    """Reconcile a local folder against the server: local-only files get
+    uploaded, server-only files (from anyone -- this is what makes a synced
+    folder behave like a shared Nextcloud-style drive rather than a
+    personal upload queue) get downloaded. Never deletes or overwrites --
+    same relative path with a different size is reported and left alone."""
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    def _on_event(event) -> None:
+        marker = "[green]✓[/green]" if event.ok else "[yellow]![/yellow]"
+        console.print(f"{marker} [{event.kind}] {event.label} {event.message}")
+
+    try:
+        with _client(base_url, token, config_file) as client:
+            if not watch:
+                events = run_sync(client, local_dir, remote_path, concurrency=concurrency, on_event=_on_event)
+                ok = sum(1 for e in events if e.ok)
+                console.print(f"[green]{ok}/{len(events)} synced[/green]")
+                return
+
+            console.print(f"[green]Watching[/green] {local_dir.resolve()} [dim](Ctrl+C to stop)[/dim]")
+            loop = SyncLoop(
+                client=client,
+                local_dir=local_dir,
+                remote_path=remote_path,
+                concurrency=concurrency,
+                poll_interval_seconds=interval,
+                on_event=_on_event,
+            )
+            try:
+                loop.run_forever()
+            except KeyboardInterrupt:
+                console.print("\n[dim]Stopped syncing.[/dim]")
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+
+@app.command("update")
+def update(
+    base_url: CommonBaseUrl = None,
+    token: CommonToken = None,
+    config_file: CommonConfig = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Apply the update if one is found (Linux builds only)")] = False,
+) -> None:
+    """Check the server's manifest for a newer client version."""
+    settings = _resolve_settings(base_url, token, config_file)
+    info = check_for_update(settings.api_base_url)
+    if not info:
+        console.print(f"[green]Up to date[/green] (v{__version__})")
+        return
+
+    console.print(f"[yellow]Update available:[/yellow] v{info.current_version} -> v{info.latest_version}")
+    if not apply:
+        console.print(f"Download: {info.download_url}")
+        console.print("Re-run with --apply to install now." if info.can_self_apply else "Download and reinstall manually.")
+        return
+
+    if not info.can_self_apply:
+        console.print(f"[yellow]Self-update isn't supported on this platform.[/yellow] Download: {info.download_url}")
+        raise typer.Exit(code=1)
+
+    console.print("Applying update and restarting...")
+    apply_update_linux(info)
+
+
+@autostart_app.command("enable")
+def autostart_enable() -> None:
+    """Register this app to launch automatically on login."""
+    if not autostart.is_supported():
+        console.print("[yellow]Only supported when running a built executable, not from source.[/yellow]")
+        raise typer.Exit(code=1)
+    autostart.enable()
+    console.print("[green]Enabled.[/green]")
+
+
+@autostart_app.command("disable")
+def autostart_disable() -> None:
+    """Unregister launch-on-login."""
+    autostart.disable()
+    console.print("[green]Disabled.[/green]")
+
+
+@autostart_app.command("status")
+def autostart_status() -> None:
+    """Show whether launch-on-login is currently enabled."""
+    if not autostart.is_supported():
+        console.print("[dim]Not supported (running from source).[/dim]")
+        return
+    console.print("Enabled" if autostart.is_enabled() else "Disabled")
 
 
 @app.command("watch")
