@@ -568,7 +568,22 @@ class FileSortingClientApp:
             pystray.MenuItem("종료", self._tray_quit),
         )
         self._tray_icon = pystray.Icon("file-sorting-uploader", _tray_icon_image(), "File Sorting Uploader", menu)
-        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        # icon.run() blocks and, per pystray's own docs, "must be called from
+        # the main thread" -- running it on a background thread (as this used
+        # to do) works by accident on Windows/Linux (those backends pump
+        # their own message loop/X11 connection either way) but hard-crashes
+        # on macOS: pystray's darwin backend calls NSApplication.run(), and
+        # AppKit now asserts that's a main-thread-only call (confirmed via a
+        # user's crash report: NSUpdateCycleInitialize() is called off the
+        # main thread, EXC_BREAKPOINT in -[NSApplication run] on a non-main
+        # thread). run_detached() is pystray's documented answer for
+        # integrating with a *different* library's mainloop -- here, Tk's
+        # root.mainloop() at the bottom of main() -- instead of running its
+        # own: on macOS it just marks the status item ready and piggybacks on
+        # Tk's Aqua event loop (which shares the same NSApplication), and on
+        # Windows/Linux it still spins its own thread internally, so this is
+        # a strict, cross-platform-safe upgrade over the old manual thread.
+        self._tray_icon.run_detached()
 
     def _tray_show(self, icon=None, item=None) -> None:
         self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
