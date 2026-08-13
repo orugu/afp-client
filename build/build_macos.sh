@@ -57,6 +57,48 @@ mkdir -p "$STAGING_DIR"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
+# Unsigned/unnotarized (no Apple Developer ID to sign with -- see the note
+# at the top of this file), so Gatekeeper always blocks the first launch
+# with "Apple could not verify ... is free of malware". Rather than making
+# every user type the xattr command themselves, ship a double-clickable
+# helper that does it for them: installs the app into /Applications if it
+# isn't there yet, strips the quarantine flag, then opens it. Users can drag
+# this file to their Desktop (or run it right out of the mounted dmg) and
+# reuse it for every future update -- it's idempotent and always targets
+# whatever .app already exists.
+cat > "$STAGING_DIR/처음 실행하기.command" <<'HELPER_EOF'
+#!/bin/bash
+# FileSortingUploader -- 첫 실행 도우미
+#
+# 서명/공증되지 않은 앱이라 macOS Gatekeeper가 처음 여는 것을 막는데
+# (브라우저로 받은 파일에 자동으로 붙는 com.apple.quarantine 표시 때문),
+# 이 스크립트가 그 표시만 지우고 앱을 엽니다. 안의 코드를 바꾸는 게
+# 아니라 macOS에 "이미 확인했다"고 알려주는 것뿐입니다.
+#
+# 한 번 실행해두면 그다음부터는 Dock/Launchpad에서 그냥 더블클릭하면
+# 됩니다. 새 버전을 새로 받았을 때는 이 스크립트를 다시 실행해주세요
+# (quarantine 표시는 다운로드할 때마다 새로 붙습니다).
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_NAME="FileSortingUploader.app"
+DEST="/Applications/$APP_NAME"
+
+if [ ! -d "$DEST" ]; then
+    if [ -d "$SCRIPT_DIR/$APP_NAME" ]; then
+        echo "Applications 폴더에 설치하는 중..."
+        cp -R "$SCRIPT_DIR/$APP_NAME" "$DEST"
+    else
+        osascript -e 'display alert "설치 실패" message "FileSortingUploader.app을 찾을 수 없습니다. 이 스크립트를 앱과 같은 폴더(다운로드한 dmg 안)에서 실행해주세요."'
+        exit 1
+    fi
+fi
+
+xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+open "$DEST"
+HELPER_EOF
+chmod +x "$STAGING_DIR/처음 실행하기.command"
+
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_PATH"
 
 python3 "$CLIENT_ROOT/build/update_manifest.py" "$TARGET_DIR/uploader-manifest.json" "$APP_NAME.dmg"

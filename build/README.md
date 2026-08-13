@@ -67,9 +67,15 @@ the same manifest format `windows/manifest.json` already uses.
 
 - **macOS Gatekeeper**: the built binary is unsigned (no Apple Developer ID
   configured for this project). Users will see "Apple could not verify
-  ... is free of malware" the first time. On current macOS (Sequoia+) the
-  classic right-click → Open trick doesn't reliably surface an Open option
-  for this exact dialog anymore -- the two workarounds that do work:
+  ... is free of malware" the first time. `build_macos.sh` bundles a
+  "처음 실행하기.command" helper inside the `.dmg`, next to the `.app` --
+  double-clicking it installs the app into `/Applications` if it isn't
+  there yet, strips the quarantine flag, and opens it, so most users never
+  need to touch Terminal. It's idempotent and safe to keep around (e.g. on
+  the Desktop) to rerun after every future download, since the quarantine
+  flag gets reapplied on each new download. If that script itself won't
+  open (some browsers/AV tools flag `.command` files too), the manual
+  fallbacks still work:
   - `xattr -d com.apple.quarantine /Applications/FileSortingUploader.app`
     (after dragging it there from the mounted .dmg), then reopen, or
   - System Settings → Privacy & Security → scroll to the bottom → "Open
