@@ -27,11 +27,27 @@ class ClientSettings(BaseSettings):
     api_token: str = Field(default="", description="Bearer token for API authentication")
     config_file: Path = Field(default=DEFAULT_CONFIG_FILE, exclude=True)
 
+    # Sync tab state, persisted so the GUI remembers the chosen folder across
+    # restarts and (with sync_auto_start) can resume the background loop
+    # without the user re-picking a folder or pressing "시작" again -- this
+    # is what makes autostart.py + this actually behave like a background
+    # service instead of a GUI that forgets everything on relaunch.
+    sync_dir: str = Field(default="", description="Last-used local folder for the sync tab/loop")
+    sync_remote_path: str = Field(default="", description="Last-used remote path for the sync tab/loop")
+    sync_concurrency: int = Field(default=4, description="Last-used concurrency for the sync tab/loop")
+    sync_auto_start: bool = Field(
+        default=False, description="Start the background sync loop automatically when the app launches"
+    )
+
     def save(self) -> None:
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "api_base_url": self.api_base_url.rstrip("/"),
             "api_token": self.api_token,
+            "sync_dir": self.sync_dir,
+            "sync_remote_path": self.sync_remote_path,
+            "sync_concurrency": self.sync_concurrency,
+            "sync_auto_start": self.sync_auto_start,
         }
         self.config_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -48,12 +64,24 @@ class ClientSettings(BaseSettings):
         *,
         api_base_url: str | None = None,
         api_token: str | None = None,
+        sync_dir: str | None = None,
+        sync_remote_path: str | None = None,
+        sync_concurrency: int | None = None,
+        sync_auto_start: bool | None = None,
     ) -> "ClientSettings":
         updates: dict[str, Any] = {}
         if api_base_url is not None:
             updates["api_base_url"] = api_base_url.rstrip("/")
         if api_token is not None:
             updates["api_token"] = api_token
+        if sync_dir is not None:
+            updates["sync_dir"] = sync_dir
+        if sync_remote_path is not None:
+            updates["sync_remote_path"] = sync_remote_path
+        if sync_concurrency is not None:
+            updates["sync_concurrency"] = sync_concurrency
+        if sync_auto_start is not None:
+            updates["sync_auto_start"] = sync_auto_start
         if not updates:
             return self
         return self.model_copy(update=updates)

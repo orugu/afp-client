@@ -16,6 +16,14 @@ the tray menu. Combined with autostart.py (launch on login), this is what
 makes "always in sync, regardless of who uploads" actually true rather than
 only true while someone remembers the window is open.
 
+The sync tab's folder/remote-path/concurrency and its "자동 동기화" checkbox
+are persisted to ClientSettings (see config.py) as soon as the loop is
+started or the checkbox is toggled. On the next launch, if the checkbox was
+on, _maybe_auto_start_sync() resumes the loop by itself -- no button press
+required, which combined with tray + autostart is what makes this behave
+like an always-on service rather than something the user has to remember to
+turn back on.
+
 On Windows only, an extra "Mount (Windows)" tab is shown that reuses the
 existing rclone-based WebDAV mount from windows/mount.py -- that mechanism
 depends on WinFsp/rclone and isn't something Linux/macOS can share, so it
@@ -106,6 +114,7 @@ class FileSortingClientApp:
 
         self._setup_tray()
         self.root.after(1500, self._check_for_updates_async)
+        self.root.after(1000, self._maybe_auto_start_sync)
 
     # -- settings -----------------------------------------------------
     def _build_settings_frame(self) -> None:
@@ -370,22 +379,30 @@ class FileSortingClientApp:
         top.pack(fill="x", padx=8, pady=8)
 
         ttk.Label(top, text="동기화할 폴더").grid(row=0, column=0, sticky="w")
-        self.sync_dir_var = tk.StringVar(value=str(Path.home() / "FileSorting_Sync"))
+        self.sync_dir_var = tk.StringVar(value=self.settings.sync_dir or str(Path.home() / "FileSorting_Sync"))
         ttk.Entry(top, textvariable=self.sync_dir_var, width=40).grid(row=0, column=1, sticky="we", padx=4)
         ttk.Button(top, text="찾아보기", command=self._pick_sync_dir).grid(row=0, column=2, padx=4)
 
         ttk.Label(top, text="서버 경로 (비워두면 전체)").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.sync_remote_var = tk.StringVar()
+        self.sync_remote_var = tk.StringVar(value=self.settings.sync_remote_path)
         ttk.Entry(top, textvariable=self.sync_remote_var, width=40).grid(
             row=1, column=1, sticky="we", padx=4, pady=(6, 0)
         )
 
         ttk.Label(top, text="동시 전송 개수").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.sync_concurrency_var = tk.IntVar(value=4)
+        self.sync_concurrency_var = tk.IntVar(value=self.settings.sync_concurrency or 4)
         ttk.Spinbox(top, from_=1, to=16, textvariable=self.sync_concurrency_var, width=6).grid(
             row=2, column=1, sticky="w", pady=(6, 0)
         )
         top.columnconfigure(1, weight=1)
+
+        self.auto_sync_var = tk.BooleanVar(value=self.settings.sync_auto_start)
+        ttk.Checkbutton(
+            top,
+            text="이 폴더를 항상 켜둔 채로 자동 동기화 (앱 시작 시 버튼 없이 자동 실행)",
+            variable=self.auto_sync_var,
+            command=self._save_sync_settings,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         btns = ttk.Frame(self.sync_tab)
         btns.pack(fill="x", padx=8)
@@ -417,6 +434,19 @@ class FileSortingClientApp:
             return None
         return client, Path(sync_dir), self.sync_remote_var.get().strip(), self.sync_concurrency_var.get()
 
+    def _save_sync_settings(self) -> None:
+        # Persists whatever's currently in the sync tab fields (not just the
+        # auto-start flag) -- so picking a folder and starting the loop once
+        # is enough for it to come back on the next launch, without a
+        # separate "save" step the user has to remember.
+        self.settings = self.settings.with_overrides(
+            sync_dir=self.sync_dir_var.get().strip(),
+            sync_remote_path=self.sync_remote_var.get().strip(),
+            sync_concurrency=self.sync_concurrency_var.get(),
+            sync_auto_start=self.auto_sync_var.get(),
+        )
+        self.settings.save()
+
     def _run_sync_once(self) -> None:
         params = self._sync_params()
         if not params:
@@ -446,10 +476,13 @@ class FileSortingClientApp:
         threading.Thread(target=_run, daemon=True).start()
 
     def _start_sync_loop(self) -> None:
+        if self._sync_loop is not None:
+            return  # already running (e.g. auto-started at launch) -- don't double it up
         params = self._sync_params()
         if not params:
             return
         client, sync_dir, remote_path, concurrency = params
+        self._save_sync_settings()
 
         self._sync_loop = SyncLoop(
             client=client,
@@ -466,21 +499,38 @@ class FileSortingClientApp:
         self._ui_queue.put(("sync", f"▶ 백그라운드 동기화 시작: {sync_dir}"))
 
     def _run_sync_loop(self) -> None:
-        assert self._sync_loop is not None
+        loop = self._sync_loop
+        assert loop is not None
         try:
-            self._sync_loop.run_forever()
+            loop.run_forever()
         except Exception as exc:  # noqa: BLE001
             self._ui_queue.put(("sync", f"❌ 동기화 중 오류: {exc}"))
         finally:
-            if self._sync_loop is not None:
-                self._sync_loop.client.close()
+            loop.client.close()
+            if self._sync_loop is loop:  # not already cleared/replaced by a stop/restart
+                self._sync_loop = None
 
     def _stop_sync_loop(self) -> None:
         if self._sync_loop:
             self._sync_loop.stop()
+            self._sync_loop = None  # allow an immediate restart; the thread finishes on its own shortly after
         self.sync_start_btn["state"] = "normal"
         self.sync_stop_btn["state"] = "disabled"
         self._ui_queue.put(("sync", "⏹ 백그라운드 동기화 중지"))
+
+    def _maybe_auto_start_sync(self) -> None:
+        # Runs once, shortly after launch. Deliberately silent on failure
+        # (no messagebox) -- this fires unattended, often minimized to tray
+        # or right after autostart.py launched the app at login, so popping
+        # a dialog nobody's there to dismiss would just be a stuck window.
+        # Errors go to the sync log instead, and the loop itself already
+        # retries forever regardless (see SyncLoop.run_forever).
+        if not self.settings.sync_auto_start or self._sync_loop is not None:
+            return
+        if not self.sync_dir_var.get().strip() or not self.settings.api_token:
+            return
+        self._ui_queue.put(("sync", "▶ 저장된 설정으로 자동 동기화 시작"))
+        self._start_sync_loop()
 
     # -- shared plumbing -----------------------------------------------------
     def _drain_ui_queue(self) -> None:
