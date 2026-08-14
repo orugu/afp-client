@@ -135,6 +135,11 @@ class BrowseEntry(BaseModel):
     size: Optional[int] = None
     modified: Optional[str] = None
     thumbnail_kind: Optional[str] = None
+    # Content hash (files only) -- lets sync_manager.diff_folder match by
+    # content instead of by literal path, since the server reorganizes an
+    # uploaded file into a category/project folder that generally does not
+    # match its original relative path.
+    sha256: Optional[str] = None
 
 
 class BrowseResponse(BaseModel):
