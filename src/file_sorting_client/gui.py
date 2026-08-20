@@ -70,6 +70,13 @@ def _tray_icon_image():
 
 
 class FileSortingClientApp:
+    # How often a long-running instance (tray-minimized, autostarted at
+    # login) re-checks for a new build after the initial startup check.
+    # Without this, an app that's never quit -- exactly the normal way to
+    # run this -- would never notice a new version until someone thought to
+    # restart it by hand.
+    _UPDATE_RECHECK_MS = 30 * 60 * 1000
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"File Sorting Client v{__version__}")
@@ -185,6 +192,16 @@ class FileSortingClientApp:
 
     # -- update check -----------------------------------------------------
     def _check_for_updates_async(self) -> None:
+        # Self-reschedules (same pattern as _drain_ui_queue) so a long-lived
+        # instance keeps noticing new versions instead of only checking once
+        # at launch -- see _UPDATE_RECHECK_MS. Deliberately doesn't skip
+        # itself just because a banner is already showing: on Windows/macOS
+        # the "update" button only opens a download page (see _apply_update)
+        # and never clears _pending_update, so gating on that would mean a
+        # user who doesn't immediately click through never gets re-reminded.
+        # check_for_update() is a single cheap read-only GET either way.
+        self.root.after(self._UPDATE_RECHECK_MS, self._check_for_updates_async)
+
         base_url = self.base_url_var.get().strip()
         if not base_url:
             return
