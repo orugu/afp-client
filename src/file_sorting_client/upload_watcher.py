@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,6 +28,14 @@ def _is_ignorable(name: str) -> bool:
     if name in _IGNORED_NAMES or name.startswith("."):
         return True
     return Path(name).suffix.lower() in _IGNORED_SUFFIXES
+
+
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass
@@ -113,12 +122,44 @@ class UploadWatcher:
         if not stable_files:
             return []
 
+        # Hash before uploading and ask the server which of these it
+        # already has -- content identical to something already filed
+        # doesn't need re-sending, even if the server's copy is sitting in
+        # _trash as a known duplicate (which this watcher, tracking only
+        # its own local upload history, has no other way to know about).
+        # Without this, a watched folder that keeps regenerating the same
+        # file under a new name (or was mirrored from the server before a
+        # dedup cleanup) re-uploads the exact same bytes forever.
+        hashes_by_src: Dict[Path, str] = {}
+        for src in stable_files:
+            try:
+                hashes_by_src[src] = _sha256_of(src)
+            except OSError:
+                pass  # let _upload_one's own stat/open surface the real error
+        try:
+            already_on_server = self.client.check_hashes(list(set(hashes_by_src.values())))
+        except ApiError:
+            already_on_server = set()  # older server, or a transient failure -- don't block uploads on this
+
         events: List[UploadEvent] = []
-        workers = min(self.concurrency, len(stable_files))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._upload_one, src): src for src in stable_files}
-            for future in as_completed(futures):
-                events.append(future.result())
+        to_upload: List[Path] = []
+        for src in stable_files:
+            if hashes_by_src.get(src) in already_on_server:
+                fingerprint = seen.get(src)
+                if fingerprint:
+                    self._uploaded[str(src)] = fingerprint
+                event = UploadEvent(src, ok=True, message="이미 서버에 있는 내용이라 업로드 생략")
+                events.append(event)
+                self._emit(event)
+            else:
+                to_upload.append(src)
+
+        if to_upload:
+            workers = min(self.concurrency, len(to_upload))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(self._upload_one, src): src for src in to_upload}
+                for future in as_completed(futures):
+                    events.append(future.result())
 
         if any(e.ok for e in events):
             self._save_state()

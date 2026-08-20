@@ -147,6 +147,12 @@ class BrowseResponse(BaseModel):
     entries: List[BrowseEntry] = Field(default_factory=list)
 
 
+class HashCheckResponse(BaseModel):
+    # Subset of the hashes we asked about that the server already has,
+    # anywhere -- organized tree or _trash. See api.check_hashes.
+    existing: List[str] = Field(default_factory=list)
+
+
 class UploadResponse(BaseModel):
     ok: bool
     saved: List[str] = Field(default_factory=list)

@@ -10,6 +10,7 @@ from file_sorting_client.models import (
     ActionResponse,
     BrowseResponse,
     ConfigResponse,
+    HashCheckResponse,
     HealthResponse,
     SearchResponse,
     UploadResponse,
@@ -167,6 +168,21 @@ class FileSortingApiClient:
         finally:
             for handle in opened:
                 handle.close()
+
+    def check_hashes(self, hashes: list[str]) -> set[str]:
+        """Asks the server which of these content hashes it already has
+        (anywhere -- organized tree or trash), in one round trip. Use this
+        instead of matching against browse() results: browse() deliberately
+        skips _trash, so content that got correctly deduped into trash
+        looks "missing" there and gets endlessly re-uploaded otherwise. See
+        sync_manager.diff_folder and upload_watcher.UploadWatcher.
+        """
+        if not hashes:
+            return set()
+        response = HashCheckResponse.model_validate(
+            self._request("POST", "/files/check-hashes", json={"hashes": list(hashes)})
+        )
+        return set(response.existing)
 
     def browse(self, path: str = "") -> BrowseResponse:
         params = {"path": path} if path else {}

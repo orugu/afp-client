@@ -157,10 +157,24 @@ def diff_folder(client: FileSortingApiClient, local_dir: Path, remote_path: str 
         if entry.sha256:
             remote_shas.add(entry.sha256)
 
+    # /files/browse deliberately skips _trash (server-side, so the folder
+    # view stays clean), so content that was correctly deduped into trash
+    # never shows up in remote_shas even though it genuinely still exists
+    # server-side. Without this, that content looks "missing" forever and
+    # gets re-uploaded on every single cycle -- ask the server directly
+    # instead of trusting the browse walk alone. See api.check_hashes.
+    try:
+        existing_shas = remote_shas | client.check_hashes(list(local_shas))
+    except ApiError:
+        # Older server without this endpoint yet, or a transient failure --
+        # fall back to the (less complete) browse-only view rather than
+        # blocking sync entirely.
+        existing_shas = remote_shas
+
     plan = SyncPlan()
     for rel, local_path in local_files.items():
         local_sha = local_sha_by_rel.get(rel)
-        if local_sha and local_sha in remote_shas:
+        if local_sha and local_sha in existing_shas:
             # This content already exists somewhere on the server -- almost
             # certainly this very file, filed under a different path after
             # classification. Nothing to do.
