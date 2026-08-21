@@ -188,6 +188,15 @@ class FileSortingApiClient:
         params = {"path": path} if path else {}
         return BrowseResponse.model_validate(self._request("GET", "/files/browse", params=params))
 
+    def browse_recursive(self, path: str = "") -> BrowseResponse:
+        """Every file under `path` in one request -- see the server-side
+        docstring on /files/browse-recursive. Older servers 404 this
+        (route didn't exist yet); download_manager.list_files_recursive
+        falls back to the slower one-call-per-directory walk in that case.
+        """
+        params = {"path": path} if path else {}
+        return BrowseResponse.model_validate(self._request("GET", "/files/browse-recursive", params=params))
+
     def download_organized_file(self, remote_path: str, destination: Path) -> Path:
         """Downloads a file already sorted into the organized output tree
         (as opposed to `download_file`, which fetches arbitrary unauthenticated

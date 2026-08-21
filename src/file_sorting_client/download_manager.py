@@ -22,7 +22,21 @@ def list_files_recursive(client: FileSortingApiClient, remote_path: str = "") ->
     every file entry found (directories are expanded, not returned). Used to
     turn "download this folder" into a flat list of individual files to
     fetch.
+
+    Prefers the server-side recursive walk (one request, one filesystem
+    pass) over doing it here one directory at a time -- SyncLoop calls this
+    every poll cycle (as often as every 15s), and a tree that's grown into
+    the hundreds of folders turned the old one-call-per-directory version
+    into tens of seconds to minutes per cycle, worse still with several
+    machines' background loops hitting the server concurrently. Falls back
+    to the old walk against a server that doesn't have the route yet.
     """
+    try:
+        return list(client.browse_recursive(remote_path).entries)
+    except ApiError as exc:
+        if exc.status_code != 404:
+            raise
+
     files: List[BrowseEntry] = []
     stack = [remote_path]
     while stack:
