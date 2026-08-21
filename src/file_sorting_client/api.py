@@ -184,6 +184,21 @@ class FileSortingApiClient:
         )
         return set(response.existing)
 
+    def check_hashes_detailed(self, hashes: list[str]) -> tuple[set[str], set[str]]:
+        """Like check_hashes, but also returns which hashes the server has
+        EVER recorded (any status, including deliberately purged ones) --
+        (existing, ever_seen). Used by diff_folder's prune support to tell
+        "never uploaded" apart from "uploaded, then the server removed it
+        on purpose" for a local file with no live server match. Older
+        servers without the ever_seen field just report it empty.
+        """
+        if not hashes:
+            return set(), set()
+        response = HashCheckResponse.model_validate(
+            self._request("POST", "/files/check-hashes", json={"hashes": list(hashes)})
+        )
+        return set(response.existing), set(response.ever_seen)
+
     def browse(self, path: str = "") -> BrowseResponse:
         params = {"path": path} if path else {}
         return BrowseResponse.model_validate(self._request("GET", "/files/browse", params=params))

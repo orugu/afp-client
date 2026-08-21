@@ -151,6 +151,10 @@ class HashCheckResponse(BaseModel):
     # Subset of the hashes we asked about that the server already has,
     # anywhere -- organized tree or _trash. See api.check_hashes.
     existing: List[str] = Field(default_factory=list)
+    # Subset the server has EVER recorded, at any status, including ones
+    # it deliberately purged. See api.check_hashes_detailed and
+    # sync_manager.diff_folder's prune support.
+    ever_seen: List[str] = Field(default_factory=list)
 
 
 class UploadResponse(BaseModel):

@@ -50,10 +50,16 @@ class SyncPlan:
     to_upload: List[Path] = field(default_factory=list)
     to_download: List[BrowseEntry] = field(default_factory=list)
     conflicts: List[str] = field(default_factory=list)  # same rel path, different size
+    # Local files whose content the server has already seen and
+    # deliberately removed (see diff_folder's include_prune) -- only ever
+    # populated when explicitly requested, and only ever acted on by
+    # run_sync when its own `prune` flag is also set. Never populated by a
+    # normal sync cycle.
+    to_prune: List[Path] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not (self.to_upload or self.to_download)
+        return not (self.to_upload or self.to_download or self.to_prune)
 
 
 @dataclass
@@ -62,6 +68,15 @@ class SyncEvent:
     label: str
     ok: bool
     message: str = ""
+
+
+def list_local_files(local_dir: Path) -> Dict[str, Path]:
+    """Public alias for _list_local -- for callers (the GUI's confirmation
+    dialogs, mainly) that just want "what's in this folder right now" to
+    show a count/size before an action like force-upload or prune, without
+    reaching into a private helper.
+    """
+    return _list_local(local_dir)
 
 
 def _list_local(local_dir: Path) -> dict:
@@ -132,10 +147,20 @@ def _local_hashes(local_files: Dict[str, Path], local_dir: Path) -> Dict[str, st
     return result
 
 
-def diff_folder(client: FileSortingApiClient, local_dir: Path, remote_path: str = "") -> SyncPlan:
+def diff_folder(
+    client: FileSortingApiClient, local_dir: Path, remote_path: str = "", *, include_prune: bool = False
+) -> SyncPlan:
     """Read-only comparison -- safe to call as often as you like, e.g. to
     preview a sync before running it. See module docstring for why this
     matches by content hash rather than relative path.
+
+    include_prune: also populate plan.to_prune with local files whose
+    content the server has already seen and deliberately removed (as
+    opposed to content it's simply never seen). Off by default -- this
+    costs nothing extra to compute (same check-hashes round trip either
+    way) but is opt-in because *acting* on to_prune deletes local files,
+    and a caller that doesn't know to check it shouldn't get a plan that
+    quietly implies deletion.
     """
     local_files = _list_local(local_dir)
     local_sha_by_rel = _local_hashes(local_files, local_dir)
@@ -163,8 +188,10 @@ def diff_folder(client: FileSortingApiClient, local_dir: Path, remote_path: str 
     # server-side. Without this, that content looks "missing" forever and
     # gets re-uploaded on every single cycle -- ask the server directly
     # instead of trusting the browse walk alone. See api.check_hashes.
+    ever_seen_shas: set = set()
     try:
-        existing_shas = remote_shas | client.check_hashes(list(local_shas))
+        existing_from_check, ever_seen_shas = client.check_hashes_detailed(list(local_sha_by_rel.values()))
+        existing_shas = remote_shas | existing_from_check
     except ApiError:
         # Older server without this endpoint yet, or a transient failure --
         # fall back to the (less complete) browse-only view rather than
@@ -178,6 +205,18 @@ def diff_folder(client: FileSortingApiClient, local_dir: Path, remote_path: str 
             # This content already exists somewhere on the server -- almost
             # certainly this very file, filed under a different path after
             # classification. Nothing to do.
+            continue
+        if include_prune and local_sha and local_sha in ever_seen_shas:
+            # Not live anywhere on the server right now, but the server HAS
+            # seen this content before (any status, including 'deleted') --
+            # this is old local backlog the server already evaluated and
+            # deliberately removed, e.g. a folder that was last synced
+            # before a server-side dedup cleanup ran. Never uploaded
+            # content (ever_seen doesn't contain it) always goes to
+            # to_upload instead, further down -- prune only ever targets
+            # content the server has explicitly already made a decision
+            # about.
+            plan.to_prune.append(local_path)
             continue
         remote_entry = remote_by_rel.get(rel)
         if remote_entry is None:
@@ -197,15 +236,78 @@ def diff_folder(client: FileSortingApiClient, local_dir: Path, remote_path: str 
     return plan
 
 
+def force_upload_folder(
+    client: FileSortingApiClient,
+    local_dir: Path,
+    *,
+    concurrency: int = 4,
+    on_event: Optional[Callable[[SyncEvent], None]] = None,
+) -> List[SyncEvent]:
+    """Uploads every file under `local_dir`, skipping the normal "does the
+    server already have this content" check entirely -- a deliberate
+    escape hatch for when you don't trust that check (or just want an
+    unconditional guarantee) rather than the everyday sync path.
+
+    Safe to run even against a huge, mostly-already-known local backlog:
+    the server-side ingest pipeline (see worker._record_known_deleted_
+    duplicate) recognizes content that was already evaluated and
+    intentionally purged before, and discards those re-uploads immediately
+    without spending a classify() call or planting a physical copy again
+    -- so this doesn't re-inflate server disk usage just because the local
+    folder is carrying old duplicate weight. Content the server has never
+    seen still gets filed normally, which is the whole point: a safety net
+    for "did anything genuinely unique in this folder ever make it up?"
+    """
+    local_files = _list_local(local_dir)
+    events: List[SyncEvent] = []
+
+    def _emit(event: SyncEvent) -> None:
+        events.append(event)
+        if on_event:
+            try:
+                on_event(event)
+            except Exception:
+                pass
+
+    def _upload_one(local_path: Path) -> None:
+        try:
+            client.upload_files([local_path])
+            _emit(SyncEvent("upload", local_path.name, ok=True, message="강제 업로드됨"))
+        except (ApiError, OSError) as exc:
+            _emit(SyncEvent("upload", local_path.name, ok=False, message=str(exc)))
+
+    if not local_files:
+        return events
+
+    workers = min(concurrency, len(local_files))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_upload_one, p) for p in local_files.values()]
+        for future in as_completed(futures):
+            future.result()
+
+    return events
+
+
 def run_sync(
     client: FileSortingApiClient,
     local_dir: Path,
     remote_path: str = "",
     *,
     concurrency: int = 4,
+    prune: bool = False,
     on_event: Optional[Callable[[SyncEvent], None]] = None,
 ) -> List[SyncEvent]:
-    plan = diff_folder(client, local_dir, remote_path)
+    """prune: also delete local files whose content the server has already
+    seen and deliberately removed (see diff_folder's include_prune) --
+    e.g. a local folder that was last synced before a server-side dedup
+    cleanup ran, still carrying gigabytes the server no longer has any
+    record of wanting. Off by default: this is the one thing anywhere in
+    this module that deletes local files, so it only ever happens when a
+    caller explicitly opts in for this one call, never as a side effect of
+    an ordinary sync cycle. Content the server has genuinely never seen is
+    never touched -- it always goes to plan.to_upload instead.
+    """
+    plan = diff_folder(client, local_dir, remote_path, include_prune=prune)
     events: List[SyncEvent] = []
 
     def _emit(event: SyncEvent) -> None:
@@ -236,14 +338,20 @@ def run_sync(
             _emit(SyncEvent("download", entry.path, ok=False, message=str(exc)))
 
     tasks = [(_upload_one, p) for p in plan.to_upload] + [(_download_one, e) for e in plan.to_download]
-    if not tasks:
-        return events
+    if tasks:
+        workers = min(concurrency, len(tasks))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(fn, arg) for fn, arg in tasks]
+            for future in as_completed(futures):
+                future.result()  # propagate unexpected exceptions; _upload_one/_download_one already catch the expected ones
 
-    workers = min(concurrency, len(tasks))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(fn, arg) for fn, arg in tasks]
-        for future in as_completed(futures):
-            future.result()  # propagate unexpected exceptions; _upload_one/_download_one already catch the expected ones
+    if prune:
+        for local_path in plan.to_prune:
+            try:
+                local_path.unlink()
+                _emit(SyncEvent("prune", local_path.name, ok=True, message="서버에 없는 옛 사본 삭제됨"))
+            except OSError as exc:
+                _emit(SyncEvent("prune", local_path.name, ok=False, message=str(exc)))
 
     return events
 
@@ -264,6 +372,7 @@ class SyncLoop:
     remote_path: str = ""
     concurrency: int = 4
     poll_interval_seconds: float = 15.0
+    prune: bool = False
     on_event: Optional[Callable[[SyncEvent], None]] = None
 
     _stop_event: Event = field(default_factory=Event, init=False, repr=False)
@@ -279,6 +388,7 @@ class SyncLoop:
                     self.local_dir,
                     self.remote_path,
                     concurrency=self.concurrency,
+                    prune=self.prune,
                     on_event=self.on_event,
                 )
             except Exception as exc:  # noqa: BLE001 - keep the loop alive

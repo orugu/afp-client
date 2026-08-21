@@ -46,7 +46,7 @@ from file_sorting_client import autostart
 from file_sorting_client.api import ApiError, FileSortingApiClient
 from file_sorting_client.config import ClientSettings
 from file_sorting_client.download_manager import download_tree
-from file_sorting_client.sync_manager import SyncLoop, run_sync
+from file_sorting_client.sync_manager import SyncLoop, force_upload_folder, list_local_files, run_sync
 from file_sorting_client.updater import UpdateInfo, apply_update_linux, check_for_update
 from file_sorting_client.upload_watcher import UploadWatcher
 
@@ -421,6 +421,21 @@ class FileSortingClientApp:
             command=self._save_sync_settings,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
+        self.prune_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            top,
+            text="동기화 시 서버에 이미 없는(정리·삭제된) 옛 로컬 파일 자동 정리",
+            variable=self.prune_var,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Label(
+            top,
+            text="⚠ 로컬 파일을 실제로 삭제합니다 — 서버가 한 번도 본 적 없는 새 파일은 절대 건드리지 않고, "
+            "서버가 이미 확인 후 의도적으로 지운 내용만 정리합니다.",
+            justify="left",
+            foreground="#a66",
+            wraplength=520,
+        ).grid(row=5, column=0, columnspan=3, sticky="w")
+
         btns = ttk.Frame(self.sync_tab)
         btns.pack(fill="x", padx=8)
         self.sync_once_btn = ttk.Button(btns, text="지금 한 번 동기화", command=self._run_sync_once)
@@ -429,6 +444,8 @@ class FileSortingClientApp:
         self.sync_start_btn.pack(side="left", padx=4)
         self.sync_stop_btn = ttk.Button(btns, text="중지", command=self._stop_sync_loop, state="disabled")
         self.sync_stop_btn.pack(side="left", padx=4)
+        self.force_upload_btn = ttk.Button(btns, text="전체 강제 업로드", command=self._run_force_upload)
+        self.force_upload_btn.pack(side="left", padx=4)
 
         self.sync_log = scrolledtext.ScrolledText(self.sync_tab, height=14, state="disabled")
         self.sync_log.pack(fill="both", expand=True, padx=8, pady=8)
@@ -472,6 +489,8 @@ class FileSortingClientApp:
         self.sync_once_btn["state"] = "disabled"
         self._ui_queue.put(("sync", f"▶ 동기화 시작: {sync_dir}"))
 
+        prune = self.prune_var.get()
+
         def _run() -> None:
             try:
                 events = run_sync(
@@ -479,6 +498,7 @@ class FileSortingClientApp:
                     sync_dir,
                     remote_path,
                     concurrency=concurrency,
+                    prune=prune,
                     on_event=lambda e: self._ui_queue.put(
                         ("sync", f"{'✅' if e.ok else '⚠️'} [{e.kind}] {e.label} {e.message}")
                     ),
@@ -489,6 +509,59 @@ class FileSortingClientApp:
             finally:
                 client.close()
                 self._ui_queue.put(("sync-once-done", ""))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _run_force_upload(self) -> None:
+        """Uploads every file in the sync folder unconditionally, ignoring
+        the normal "server already has this" check -- a safety-net button
+        for "make sure nothing in this folder was ever missed", separate
+        from (and less trusting than) the everyday sync path. See
+        force_upload_folder's docstring for why this is safe to run even
+        against a huge old local backlog without re-inflating server disk
+        usage: content the server already evaluated and deliberately
+        removed gets discarded again immediately, no classify() call, no
+        physical copy replanted -- only genuinely new content is filed.
+        """
+        params = self._sync_params()
+        if not params:
+            return
+        client, sync_dir, _remote_path, concurrency = params
+
+        local_files = list_local_files(sync_dir)
+        if not local_files:
+            client.close()
+            messagebox.showinfo("강제 업로드", "폴더에 파일이 없습니다.")
+            return
+        total_bytes = sum(p.stat().st_size for p in local_files.values() if p.is_file())
+        confirmed = messagebox.askyesno(
+            "전체 강제 업로드",
+            f"{sync_dir}\n\n{len(local_files)}개 파일 (약 {total_bytes / 1e9:.2f}GB)을 서버에 조건 없이 "
+            "전부 업로드합니다. 서버가 이미 알고 있는 내용이어도 다시 보냅니다.\n\n계속할까요?",
+        )
+        if not confirmed:
+            client.close()
+            return
+
+        self.force_upload_btn["state"] = "disabled"
+        self._ui_queue.put(("sync", f"▶ 전체 강제 업로드 시작: {sync_dir} ({len(local_files)}개)"))
+
+        def _run() -> None:
+            try:
+                events = force_upload_folder(
+                    client,
+                    sync_dir,
+                    concurrency=concurrency,
+                    on_event=lambda e: self._ui_queue.put(
+                        ("sync", f"{'✅' if e.ok else '⚠️'} [{e.kind}] {e.label} {e.message}")
+                    ),
+                )
+                self._ui_queue.put(("sync", f"강제 업로드 완료: {len(events)}건 처리"))
+            except Exception as exc:  # noqa: BLE001
+                self._ui_queue.put(("sync", f"❌ 오류: {exc}"))
+            finally:
+                client.close()
+                self._ui_queue.put(("force-upload-done", ""))
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -506,6 +579,7 @@ class FileSortingClientApp:
             local_dir=sync_dir,
             remote_path=remote_path,
             concurrency=concurrency,
+            prune=self.prune_var.get(),
             on_event=lambda e: self._ui_queue.put(
                 ("sync", f"{'✅' if e.ok else '⚠️'} [{e.kind}] {e.label} {e.message}")
             ),
@@ -554,11 +628,13 @@ class FileSortingClientApp:
         try:
             while True:
                 target, message = self._ui_queue.get_nowait()
-                if target in ("download-done", "sync-once-done"):
+                if target in ("download-done", "sync-once-done", "force-upload-done"):
                     if target == "download-done":
                         self.download_btn["state"] = "normal"
-                    else:
+                    elif target == "sync-once-done":
                         self.sync_once_btn["state"] = "normal"
+                    else:
+                        self.force_upload_btn["state"] = "normal"
                     continue
                 widget = {"upload": self.upload_log, "download": self.download_log, "sync": self.sync_log}[target]
                 widget["state"] = "normal"
