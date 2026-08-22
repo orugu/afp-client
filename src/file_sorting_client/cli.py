@@ -20,7 +20,7 @@ from file_sorting_client.display import (
 )
 from file_sorting_client import __version__, autostart
 from file_sorting_client.download_manager import download_tree
-from file_sorting_client.sync_manager import SyncLoop, run_sync
+from file_sorting_client.sync_manager import SyncLoop, force_upload_folder, list_local_files, run_sync
 from file_sorting_client.updater import apply_update_linux, check_for_update
 from file_sorting_client.upload_watcher import UploadWatcher
 
@@ -410,6 +410,14 @@ def sync(
     concurrency: Annotated[
         int, typer.Option("--concurrency", min=1, max=32, help="Concurrent transfers in flight")
     ] = 4,
+    prune: Annotated[
+        bool,
+        typer.Option(
+            "--prune",
+            help="Delete local files whose content the server has seen before but no longer has "
+            "(cleaned up / purged remotely) -- destructive, off by default",
+        ),
+    ] = False,
     base_url: CommonBaseUrl = None,
     token: CommonToken = None,
     config_file: CommonConfig = None,
@@ -418,7 +426,8 @@ def sync(
     uploaded, server-only files (from anyone -- this is what makes a synced
     folder behave like a shared Nextcloud-style drive rather than a
     personal upload queue) get downloaded. Never deletes or overwrites --
-    same relative path with a different size is reported and left alone."""
+    same relative path with a different size is reported and left alone,
+    unless --prune is passed."""
     local_dir.mkdir(parents=True, exist_ok=True)
 
     def _on_event(event) -> None:
@@ -428,7 +437,9 @@ def sync(
     try:
         with _client(base_url, token, config_file) as client:
             if not watch:
-                events = run_sync(client, local_dir, remote_path, concurrency=concurrency, on_event=_on_event)
+                events = run_sync(
+                    client, local_dir, remote_path, concurrency=concurrency, prune=prune, on_event=_on_event
+                )
                 ok = sum(1 for e in events if e.ok)
                 console.print(f"[green]{ok}/{len(events)} synced[/green]")
                 return
@@ -440,6 +451,7 @@ def sync(
                 remote_path=remote_path,
                 concurrency=concurrency,
                 poll_interval_seconds=interval,
+                prune=prune,
                 on_event=_on_event,
             )
             try:
@@ -448,6 +460,53 @@ def sync(
                 console.print("\n[dim]Stopped syncing.[/dim]")
     except ApiError as exc:
         _handle_api_error(exc)
+
+
+@app.command("force-upload")
+def force_upload(
+    local_dir: Annotated[Path, typer.Argument(help="Local folder to unconditionally re-upload, file by file")],
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", min=1, max=32, help="Concurrent uploads in flight")
+    ] = 4,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt")
+    ] = False,
+    base_url: CommonBaseUrl = None,
+    token: CommonToken = None,
+    config_file: CommonConfig = None,
+) -> None:
+    """Upload every file under LOCAL_DIR unconditionally, bypassing the
+    normal "does the server already have this" check -- a recovery escape
+    hatch for when you don't trust that a regular sync caught everything.
+    Safe to run even against a huge already-known backlog: the server
+    recognizes content it evaluated and purged before and discards those
+    re-uploads without re-inflating disk usage."""
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local_files = list_local_files(local_dir)
+    if not local_files:
+        console.print("[yellow]No local files found.[/yellow]")
+        return
+
+    total_bytes = sum(p.stat().st_size for p in local_files.values() if p.is_file())
+    if not yes:
+        confirmed = typer.confirm(
+            f"{len(local_files)}개 파일 ({total_bytes / 1e9:.2f}GB)을 무조건 재업로드합니다. 계속할까요?"
+        )
+        if not confirmed:
+            raise typer.Exit(code=0)
+
+    def _on_event(event) -> None:
+        marker = "[green]✓[/green]" if event.ok else "[yellow]![/yellow]"
+        console.print(f"{marker} {event.label} {event.message}")
+
+    try:
+        with _client(base_url, token, config_file) as client:
+            events = force_upload_folder(client, local_dir, concurrency=concurrency, on_event=_on_event)
+    except ApiError as exc:
+        _handle_api_error(exc)
+
+    ok = sum(1 for e in events if e.ok)
+    console.print(f"[green]{ok}/{len(events)} uploaded[/green]")
 
 
 @app.command("update")
