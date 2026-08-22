@@ -221,7 +221,25 @@ def diff_folder(
         remote_entry = remote_by_rel.get(rel)
         if remote_entry is None:
             plan.to_upload.append(local_path)
+        elif local_sha:
+            # local_sha is confirmed NOT to match any content the server
+            # has anywhere (the existing_shas check above already
+            # `continue`d if it did) -- so a remote entry existing at this
+            # same relative path always means genuinely different content
+            # now, not just a coincidentally matching size. Previously this
+            # only flagged a conflict when sizes also differed, which
+            # silently ignored a same-size-different-content mismatch
+            # forever. That's exactly the shape a version bump can take: a
+            # newer server-side revision landing back at the same served
+            # path (see the version-tracking feature) with about the same
+            # size as what this file used to be -- would have gone
+            # unnoticed here indefinitely, with no upload, no download, and
+            # no conflict ever surfaced.
+            plan.conflicts.append(rel)
         elif remote_entry.size is not None and remote_entry.size != local_path.stat().st_size:
+            # Local file couldn't be hashed (e.g. a transient IO error) --
+            # fall back to the weaker size-only signal rather than silently
+            # treating an unreadable file as a non-conflict.
             plan.conflicts.append(rel)
 
     for rel, entry in remote_by_rel.items():
@@ -319,7 +337,10 @@ def run_sync(
                 pass
 
     for rel in plan.conflicts:
-        _emit(SyncEvent("conflict", rel, ok=False, message="같은 경로, 크기가 달라 건너뜀 (수동 확인 필요)"))
+        _emit(SyncEvent(
+            "conflict", rel, ok=False,
+            message="같은 경로에 내용이 다른 파일이 있어 건너뜀 (수동 확인 필요 -- 서버에 새 버전이 올라왔을 수 있습니다)",
+        ))
 
     def _upload_one(local_path: Path) -> None:
         try:
