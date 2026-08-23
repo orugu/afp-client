@@ -97,6 +97,41 @@ def _rel_to_remote_base(entry_path: str, remote_base: str) -> str:
     return entry_path[len(prefix):] if entry_path.startswith(prefix) else entry_path
 
 
+def _nudge_server_scan(client: FileSortingApiClient) -> None:
+    """After uploading, ask the server to scan right away instead of
+    silently leaving newly-uploaded files to wait for its own background
+    poll loop -- which only runs every poll_interval_seconds (8s by
+    default) to begin with. From the desktop client, that meant a sync/
+    force-upload could report "완료" while the files sat untouched with
+    nothing to show for it -- exactly the "did this actually do anything"
+    confusion the web dashboard's own upload flow already avoids by making
+    this same call.
+
+    Calls twice, not once: the server's stability check (see worker.py's
+    _scan_and_process) only starts processing a file once it's been
+    observed with an unchanged size+mtime across two separate scans -- by
+    design, so a file that's still mid-copy into watch_dir is never picked
+    up half-written. A single scan-once call only registers that first
+    observation; confirmed live that left a freshly-uploaded file still
+    waiting on the server's own next background poll (up to
+    poll_interval_seconds later) for the second one. Since the upload
+    already completed synchronously over HTTP before this ever runs, the
+    file's on-disk size/mtime are already final -- two immediate,
+    back-to-back calls here safely satisfy that same check right away
+    instead of waiting on it.
+
+    Best-effort throughout: if this fails (older server without the
+    endpoint, a transient error), the files are already safely uploaded
+    regardless, and the server's own poll loop picks them up on schedule
+    either way -- never worth failing the whole sync/upload over.
+    """
+    for _ in range(2):
+        try:
+            client.scan_once()
+        except ApiError:
+            return
+
+
 def _sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -315,6 +350,7 @@ def force_upload_folder(
         for future in as_completed(futures):
             future.result()
 
+    _nudge_server_scan(client)
     return events
 
 
@@ -377,6 +413,9 @@ def run_sync(
             futures = [executor.submit(fn, arg) for fn, arg in tasks]
             for future in as_completed(futures):
                 future.result()  # propagate unexpected exceptions; _upload_one/_download_one already catch the expected ones
+
+    if plan.to_upload:
+        _nudge_server_scan(client)
 
     if prune:
         for local_path in plan.to_prune:

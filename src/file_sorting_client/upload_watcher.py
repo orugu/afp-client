@@ -160,6 +160,21 @@ class UploadWatcher:
                 futures = {executor.submit(self._upload_one, src): src for src in to_upload}
                 for future in as_completed(futures):
                     events.append(future.result())
+            # Ask the server to scan right away rather than leave these
+            # newly-uploaded files to wait for its own background poll
+            # loop. Two calls, not one: the server only starts processing a
+            # file once it's seen its size+mtime unchanged across two
+            # separate scans (a still-being-written guard) -- a single call
+            # only registers the first observation. Since the upload just
+            # completed synchronously over HTTP, the file's on disk is
+            # already final, so two immediate calls safely satisfy that
+            # right away. Best-effort: the files are already safely
+            # uploaded regardless of whether this succeeds.
+            for _ in range(2):
+                try:
+                    self.client.scan_once()
+                except ApiError:
+                    break
 
         if any(e.ok for e in events):
             self._save_state()
