@@ -13,6 +13,7 @@ class Event(BaseModel):
 
 
 class FileDecision(BaseModel):
+    id: Optional[int] = None
     timestamp: str
     filename: str
     source_path: str
@@ -20,6 +21,23 @@ class FileDecision(BaseModel):
     category: Optional[str] = None
     reason: Optional[str] = None
     status: str
+    sha256: Optional[str] = None
+    score: Optional[int] = None
+    # This row's place in its version lineage (see the server's
+    # FileWorker._resolve_version) -- Optional/silently-missing-safe
+    # because a server older than the version-tracking feature won't send
+    # these at all, and pydantic just leaves them None rather than
+    # erroring. Declared here (not just present in the server's JSON) is
+    # what actually makes them visible anywhere in the CLI: pydantic
+    # silently drops any field a model doesn't declare when parsing a
+    # response, model or no model -- confirmed the same gap existed
+    # server-side (FastAPI's response_model did this to /api/search and
+    # /api/status before that got fixed) and was still present here on the
+    # client side (fsc search/status and their --json output had no way to
+    # show sha256/score either, let alone the new version fields, even
+    # though the server always returned them).
+    version: Optional[str] = None
+    version_source: Optional[str] = None
 
 
 class WorkerStateResponse(BaseModel):

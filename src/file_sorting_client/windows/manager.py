@@ -114,8 +114,17 @@ class ManagerApp:
 
         def worker() -> None:
             try:
-                fn()
-                self.root.after(0, lambda: self.status_var.set(f"{label} completed."))
+                # If fn() returns a string, show that as the completion
+                # message instead of the generic "{label} completed." --
+                # e.g. run_cleanup wants to report how many files it
+                # removed. Without this, that specific result was scheduled
+                # via root.after(0, ...) *inside* fn(), and this generic
+                # message -- scheduled immediately after fn() returns, same
+                # delay -- always ran second and silently clobbered it
+                # before the user had any real chance to read it.
+                result = fn()
+                message = result if isinstance(result, str) and result else f"{label} completed."
+                self.root.after(0, lambda: self.status_var.set(message))
                 self.root.after(0, self.refresh_status)
             except Exception as exc:
                 message = str(exc)
@@ -155,9 +164,9 @@ class ManagerApp:
         self._run_async("Stopping mount", lambda: stop_mount(state.drive_letter))
 
     def run_cleanup(self) -> None:
-        def action() -> None:
+        def action() -> str:
             removed = cleanup_cache()
-            self.root.after(0, lambda: self.status_var.set(f"Removed {removed} stale cache file(s)."))
+            return f"Removed {removed} stale cache file(s)."
 
         self._run_async("Cleaning cache", action)
 

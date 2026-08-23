@@ -56,14 +56,19 @@ def print_decisions_table(items: list[FileDecision], *, title: str = "Search Res
     table.add_column("Time", style="dim")
     table.add_column("File")
     table.add_column("Category")
+    table.add_column("Version")
     table.add_column("Status")
     table.add_column("Reason")
 
     for item in items:
+        version = item.version or "-"
+        if item.version and item.version_source == "detected":
+            version = f"{version} (detected)"
         table.add_row(
             item.timestamp,
             item.filename,
             item.category or "-",
+            version,
             item.status,
             item.reason or "-",
         )
