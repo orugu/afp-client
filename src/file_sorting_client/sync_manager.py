@@ -201,10 +201,41 @@ def diff_folder(
     plan = SyncPlan()
     for rel, local_path in local_files.items():
         local_sha = local_sha_by_rel.get(rel)
+        remote_entry = remote_by_rel.get(rel)
+
+        # Check what's CURRENTLY at this exact relative path on the server
+        # first, before the "is this content known anywhere on the server"
+        # shortcut below -- content matching an OLD, since-superseded
+        # revision is correctly "known" (existing_shas includes archived
+        # versions, see api.check_hashes_detailed), so the shortcut would
+        # otherwise silently swallow the one signal that actually matters
+        # here: a newer revision now lives at this exact path and the local
+        # copy is stale. Confirmed live against a real server: a local file
+        # byte-identical to an archived old version, sitting at the same
+        # path a newer version now occupies, produced neither an upload,
+        # nor a download, nor a conflict -- nothing at all -- until this
+        # check moved ahead of the shortcut.
+        if remote_entry is not None and local_sha and remote_entry.sha256 and remote_entry.sha256 != local_sha:
+            plan.conflicts.append(rel)
+            continue
+        if (
+            remote_entry is not None
+            and not remote_entry.sha256
+            and remote_entry.size is not None
+            and remote_entry.size != local_path.stat().st_size
+        ):
+            # Neither side has a usable hash for this exact path -- fall
+            # back to the weaker size-only signal rather than silently
+            # treating an unreadable/unhashed file as a non-conflict.
+            plan.conflicts.append(rel)
+            continue
+
         if local_sha and local_sha in existing_shas:
-            # This content already exists somewhere on the server -- almost
-            # certainly this very file, filed under a different path after
-            # classification. Nothing to do.
+            # This content already exists somewhere on the server (and, per
+            # the check above, it's not stale content sitting under a path
+            # a newer revision now occupies) -- almost certainly this very
+            # file, filed under a different path after classification.
+            # Nothing to do.
             continue
         if include_prune and local_sha and local_sha in ever_seen_shas:
             # Not live anywhere on the server right now, but the server HAS
@@ -218,29 +249,10 @@ def diff_folder(
             # about.
             plan.to_prune.append(local_path)
             continue
-        remote_entry = remote_by_rel.get(rel)
         if remote_entry is None:
             plan.to_upload.append(local_path)
-        elif local_sha:
-            # local_sha is confirmed NOT to match any content the server
-            # has anywhere (the existing_shas check above already
-            # `continue`d if it did) -- so a remote entry existing at this
-            # same relative path always means genuinely different content
-            # now, not just a coincidentally matching size. Previously this
-            # only flagged a conflict when sizes also differed, which
-            # silently ignored a same-size-different-content mismatch
-            # forever. That's exactly the shape a version bump can take: a
-            # newer server-side revision landing back at the same served
-            # path (see the version-tracking feature) with about the same
-            # size as what this file used to be -- would have gone
-            # unnoticed here indefinitely, with no upload, no download, and
-            # no conflict ever surfaced.
-            plan.conflicts.append(rel)
-        elif remote_entry.size is not None and remote_entry.size != local_path.stat().st_size:
-            # Local file couldn't be hashed (e.g. a transient IO error) --
-            # fall back to the weaker size-only signal rather than silently
-            # treating an unreadable file as a non-conflict.
-            plan.conflicts.append(rel)
+        # else: a remote entry exists at this path and (per the checks
+        # above) its content matches -- nothing to do.
 
     for rel, entry in remote_by_rel.items():
         if rel in local_files:

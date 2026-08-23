@@ -432,7 +432,16 @@ def sync(
 
     def _on_event(event) -> None:
         marker = "[green]✓[/green]" if event.ok else "[yellow]![/yellow]"
-        console.print(f"{marker} [{event.kind}] {event.label} {event.message}")
+        # event.kind ("upload"/"download"/"conflict"/"prune"/"error") must
+        # NOT be interpolated inside a bracket pair here -- rich's Console
+        # treats any [...] in the printed string as markup, and since none
+        # of those words are real style names, the whole "[kind]" tag was
+        # silently eaten from the visible output instead of raising (rich
+        # is lenient about unknown style names) -- confirmed live: every
+        # sync line has always been missing its kind, and it's exactly the
+        # distinction (upload vs download vs conflict vs prune) a user
+        # needs to make sense of a sync run at a glance.
+        console.print(f"{marker} {event.kind}: {event.label} {event.message}")
 
     try:
         with _client(base_url, token, config_file) as client:
