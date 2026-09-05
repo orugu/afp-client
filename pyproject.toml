@@ -1,6 +1,6 @@
 [project]
 name = "file-sorting-client"
-version = "0.4.7"
+version = "0.4.8"
 description = "Auto File Processor API client"
 requires-python = ">=3.11"
 dependencies = [

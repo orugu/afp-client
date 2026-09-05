@@ -244,22 +244,63 @@ _GENERIC_FOLDER_NAMES = {
 
 
 def folder_hint_by_rel(snapshot: Dict[str, dict]) -> Dict[str, str]:
-    """rel_path -> the file's immediate local parent folder's own name, when
-    it looks like a real, user-chosen name rather than a generic system
-    folder or the sync root itself (parent == ""). A human-picked folder
-    name (e.g. "invoice_2024_project") is often the single best signal for
-    what to call a project -- see api.upload_files' folder_hint_map /
-    main.py's /api/files/upload `folder_hints` field / worker.py's
+    """rel_path -> the file's TOP-LEVEL local folder name (the first path
+    segment under the sync root), when it looks like a real, user-chosen
+    name rather than a generic system folder, and the file isn't sitting
+    directly at the sync root (no folder at all). Uses the TOP-LEVEL
+    segment rather than the immediate parent so that every file anywhere
+    under the same project folder -- including nested subfolders --
+    reports the identical hint string; that's what lets them converge on
+    the same server-side project_hint instead of each subfolder reporting
+    a different name. See api.upload_files' folder_hint_map / main.py's
+    /api/files/upload `folder_hints` field / worker.py's
     _resolve_local_folder_hint, which still runs its own atomicity check
-    before ever trusting this name for anything.
+    (see subtree_by_rel below) before ever trusting this name for
+    anything.
     """
     result: Dict[str, str] = {}
     for rel in snapshot:
-        parent = Path(rel).parent
-        if str(parent) in ("", "."):
-            continue
-        name = parent.name
+        parts = Path(rel).parts
+        if len(parts) < 2:
+            continue  # sits directly at the sync root -- no folder at all
+        name = parts[0]
         if name.strip().lower() in _GENERIC_FOLDER_NAMES:
             continue
         result[rel] = name
+    return result
+
+
+# Cap on how many rel paths get reported per upload's subtree context --
+# mirrors worker.py's own _MAX_UPLOAD_SUBTREE trim, applied here too so a
+# huge local project folder doesn't balloon every single upload's payload.
+_MAX_SUBTREE_ENTRIES = 500
+
+
+def subtree_by_rel(snapshot: Dict[str, dict]) -> Dict[str, List[str]]:
+    """rel_path -> every path INSIDE that file's top-level local folder
+    (itself included), each expressed relative to that top-level folder --
+    e.g. for "invoice_project/src/util.py" this reports paths like
+    "invoice.xlsx" and "src/util.py", not the full "invoice_project/..."
+    prefix (folder_hint_by_rel already carries the folder's own name
+    separately). Sent alongside folder_hint so the server can run its full
+    recursive/nested folder-atomicity judgment (project_folder_detector.
+    classify_virtual_tree) instead of just a flat one-level check.
+
+    Files sitting directly at the sync root (no top-level folder at all)
+    get an empty list -- there's no subtree to report.
+    """
+    by_top: Dict[str, List[str]] = {}
+    top_of: Dict[str, str] = {}
+    for rel in snapshot:
+        parts = Path(rel).parts
+        if len(parts) < 2:
+            continue
+        top = parts[0]
+        by_top.setdefault(top, []).append("/".join(parts[1:]))
+        top_of[rel] = top
+
+    result: Dict[str, List[str]] = {}
+    for rel in snapshot:
+        top = top_of.get(rel)
+        result[rel] = sorted(by_top.get(top, []))[:_MAX_SUBTREE_ENTRIES] if top else []
     return result

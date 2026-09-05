@@ -156,6 +156,7 @@ class FileSortingApiClient:
         paths: list[Path],
         sibling_map: dict[str, list[str]] | None = None,
         folder_hint_map: dict[str, str] | None = None,
+        subtree_map: dict[str, list[str]] | None = None,
     ) -> UploadResponse:
         """POSTs one or more local files to /files/upload for the server's
         worker to pick up from watch_dir. httpx.Client is safe to reuse
@@ -166,14 +167,19 @@ class FileSortingApiClient:
         sibling_map: optional {filename: [local folder-mate filenames]},
         keyed by each path's own .name -- see folder_snapshot.siblings_by_rel.
         folder_hint_map: optional {filename: local folder name}, same keying
-        -- see folder_snapshot.folder_hint_by_rel. Both sent as extra form
-        fields so the server's very first classify() call for a new file
-        can see real local folder context (previously only its own
-        re-review pass ever had this) and, when the server's own
-        folder-atomicity check agrees, a real human-chosen project name
-        instead of none at all. An older server that doesn't recognize
-        either field just ignores it; omit both (default) to upload exactly
-        as before.
+        -- see folder_snapshot.folder_hint_by_rel. subtree_map: optional
+        {filename: [rel_path, ...]} -- every path under that file's
+        top-level local folder, see folder_snapshot.subtree_by_rel; lets
+        the server run its full recursive/nested folder-atomicity judgment
+        instead of the flat one-level check sibling_map alone allows.
+
+        All three sent as extra form fields so the server's very first
+        classify() call for a new file can see real local folder context
+        (previously only its own re-review pass ever had this) and, when
+        the server's own folder-atomicity check agrees, a real human-chosen
+        project name instead of none at all. An older server that doesn't
+        recognize any of these fields just ignores them; omit all three
+        (default) to upload exactly as before.
         """
         files = []
         opened = []
@@ -191,6 +197,10 @@ class FileSortingApiClient:
                 relevant_hints = {p.name: folder_hint_map[p.name] for p in paths if folder_hint_map.get(p.name)}
                 if relevant_hints:
                     data["folder_hints"] = json.dumps(relevant_hints)
+            if subtree_map:
+                relevant_subtrees = {p.name: subtree_map[p.name] for p in paths if subtree_map.get(p.name)}
+                if relevant_subtrees:
+                    data["subtree_paths"] = json.dumps(relevant_subtrees)
             return UploadResponse.model_validate(
                 self._request("POST", "/files/upload", files=files, data=data)
             )
