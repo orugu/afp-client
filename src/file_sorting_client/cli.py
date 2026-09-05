@@ -432,7 +432,7 @@ def sync(
 
     def _on_event(event) -> None:
         marker = "[green]✓[/green]" if event.ok else "[yellow]![/yellow]"
-        # event.kind ("upload"/"download"/"conflict"/"prune"/"error") must
+        # event.kind ("upload"/"download"/"conflict"/"prune"/"moved"/"error") must
         # NOT be interpolated inside a bracket pair here -- rich's Console
         # treats any [...] in the printed string as markup, and since none
         # of those words are real style names, the whole "[kind]" tag was

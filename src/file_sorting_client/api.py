@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -150,12 +151,22 @@ class FileSortingApiClient:
             destination.write_bytes(response.content)
         return destination
 
-    def upload_files(self, paths: list[Path]) -> UploadResponse:
+    def upload_files(
+        self, paths: list[Path], sibling_map: dict[str, list[str]] | None = None
+    ) -> UploadResponse:
         """POSTs one or more local files to /files/upload for the server's
         worker to pick up from watch_dir. httpx.Client is safe to reuse
         across threads (see upload_watcher.py, which calls this
         concurrently) as long as each call opens its own file handles, which
         this does.
+
+        sibling_map: optional {filename: [local folder-mate filenames]},
+        keyed by each path's own .name -- see folder_snapshot.siblings_by_rel.
+        Sent as an extra form field so the server's very first classify()
+        call for a new file can see real local folder context (previously
+        only its own re-review pass ever had this). An older server that
+        doesn't recognize the field just ignores it; omit sibling_map
+        entirely (default) to upload exactly as before.
         """
         files = []
         opened = []
@@ -164,7 +175,14 @@ class FileSortingApiClient:
                 handle = path.open("rb")
                 opened.append(handle)
                 files.append(("files", (path.name, handle, "application/octet-stream")))
-            return UploadResponse.model_validate(self._request("POST", "/files/upload", files=files))
+            data = {}
+            if sibling_map:
+                relevant = {p.name: sibling_map[p.name] for p in paths if sibling_map.get(p.name)}
+                if relevant:
+                    data["siblings"] = json.dumps(relevant)
+            return UploadResponse.model_validate(
+                self._request("POST", "/files/upload", files=files, data=data)
+            )
         finally:
             for handle in opened:
                 handle.close()

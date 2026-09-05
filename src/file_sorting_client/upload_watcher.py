@@ -155,9 +155,17 @@ class UploadWatcher:
                 to_upload.append(src)
 
         if to_upload:
+            # watch_dir is flat (no subfolders), so every other file
+            # currently sitting in it is a genuine local folder-mate --
+            # sent along so the server's classify() call gets real context
+            # instead of none at all (see api.upload_files/main.py's
+            # /api/files/upload `siblings` field).
+            sibling_names = [p.name for p in files]
             workers = min(self.concurrency, len(to_upload))
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(self._upload_one, src): src for src in to_upload}
+                futures = {
+                    executor.submit(self._upload_one, src, sibling_names): src for src in to_upload
+                }
                 for future in as_completed(futures):
                     events.append(future.result())
             # Ask the server to scan right away rather than leave these
@@ -180,11 +188,13 @@ class UploadWatcher:
             self._save_state()
         return events
 
-    def _upload_one(self, src: Path) -> UploadEvent:
+    def _upload_one(self, src: Path, sibling_names: Optional[List[str]] = None) -> UploadEvent:
         try:
             stat = src.stat()
             fingerprint = (stat.st_size, stat.st_mtime)
-            self.client.upload_files([src])
+            others = [n for n in (sibling_names or []) if n != src.name]
+            sibling_map = {src.name: others} if others else None
+            self.client.upload_files([src], sibling_map=sibling_map)
             self._uploaded[str(src)] = fingerprint
             event = UploadEvent(src, ok=True, message="uploaded")
         except ApiError as exc:

@@ -26,23 +26,17 @@ path+size for entries the server hasn't hashed yet (e.g. very old rows).
 
 from __future__ import annotations
 
-import hashlib
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from file_sorting_client.api import ApiError, FileSortingApiClient
 from file_sorting_client.download_manager import list_files_recursive
+from file_sorting_client import folder_snapshot
+from file_sorting_client.folder_snapshot import _list_local, _local_hashes
 from file_sorting_client.models import BrowseEntry
-
-_IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
-# Local cache of already-hashed files (keyed by relative path, invalidated
-# by mtime+size) so a folder that isn't changing doesn't get fully re-read
-# and re-hashed every poll cycle -- sync loops as often as every 15s.
-_HASH_CACHE_FILENAME = ".afp_sync_hash_cache.json"
 
 
 @dataclass
@@ -56,6 +50,16 @@ class SyncPlan:
     # run_sync when its own `prune` flag is also set. Never populated by a
     # normal sync cycle.
     to_prune: List[Path] = field(default_factory=list)
+    # (old_rel, new_rel) pairs the local folder-structure snapshot detected
+    # as a local move/rename since the last diff_folder call -- see
+    # folder_snapshot.py. Purely informational: content-hash matching
+    # already makes this a no-op either way (see module docstring), this
+    # just makes it visible instead of silent.
+    moved: List[Tuple[str, str]] = field(default_factory=list)
+    # rel_path -> local folder-mate filenames, from the current snapshot --
+    # attached to uploads so the server's classify() call gets real local
+    # folder context. See folder_snapshot.siblings_by_rel.
+    sibling_map: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def is_empty(self) -> bool:
@@ -77,17 +81,6 @@ def list_local_files(local_dir: Path) -> Dict[str, Path]:
     reaching into a private helper.
     """
     return _list_local(local_dir)
-
-
-def _list_local(local_dir: Path) -> dict:
-    result = {}
-    if not local_dir.is_dir():
-        return result
-    for p in local_dir.rglob("*"):
-        if p.is_file() and p.name not in _IGNORED_NAMES and not p.name.startswith("."):
-            rel = p.relative_to(local_dir).as_posix()
-            result[rel] = p
-    return result
 
 
 def _rel_to_remote_base(entry_path: str, remote_base: str) -> str:
@@ -132,56 +125,6 @@ def _nudge_server_scan(client: FileSortingApiClient) -> None:
             return
 
 
-def _sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _load_hash_cache(local_dir: Path) -> Dict[str, dict]:
-    try:
-        return json.loads((local_dir / _HASH_CACHE_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_hash_cache(local_dir: Path, cache: Dict[str, dict]) -> None:
-    try:
-        (local_dir / _HASH_CACHE_FILENAME).write_text(json.dumps(cache), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _local_hashes(local_files: Dict[str, Path], local_dir: Path) -> Dict[str, str]:
-    """rel path -> sha256 for every local file, reusing the on-disk cache
-    for anything whose mtime+size hasn't changed since it was last hashed.
-    """
-    cache = _load_hash_cache(local_dir)
-    result = {}
-    changed = False
-    for rel, path in local_files.items():
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        cached = cache.get(rel)
-        if cached and cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size:
-            result[rel] = cached["sha256"]
-            continue
-        try:
-            digest = _sha256_of(path)
-        except OSError:
-            continue
-        result[rel] = digest
-        cache[rel] = {"mtime": stat.st_mtime, "size": stat.st_size, "sha256": digest}
-        changed = True
-    if changed:
-        _save_hash_cache(local_dir, cache)
-    return result
-
-
 def diff_folder(
     client: FileSortingApiClient, local_dir: Path, remote_path: str = "", *, include_prune: bool = False
 ) -> SyncPlan:
@@ -200,6 +143,21 @@ def diff_folder(
     local_files = _list_local(local_dir)
     local_sha_by_rel = _local_hashes(local_files, local_dir)
     local_shas = set(local_sha_by_rel.values())
+
+    # Structure snapshot: reuses the hashes just computed above rather than
+    # re-hashing (folder_snapshot.build_snapshot would otherwise redo the
+    # exact same work). Diffed against the previous run's snapshot to
+    # surface local moves/renames (see folder_snapshot.py), then persisted
+    # for next time.
+    current_snapshot = {
+        rel: {"sha256": sha, "size": local_files[rel].stat().st_size}
+        for rel, sha in local_sha_by_rel.items()
+        if local_files[rel].is_file()
+    }
+    previous_snapshot = folder_snapshot.load_snapshot(local_dir)
+    structure_diff = folder_snapshot.diff_snapshots(previous_snapshot, current_snapshot)
+    folder_snapshot.save_snapshot(local_dir, current_snapshot)
+    sibling_map = folder_snapshot.siblings_by_rel(current_snapshot)
 
     try:
         remote_entries = list_files_recursive(client, remote_path)
@@ -298,6 +256,8 @@ def diff_folder(
             continue
         plan.to_download.append(entry)
 
+    plan.moved = structure_diff.moved
+    plan.sibling_map = sibling_map
     return plan
 
 
@@ -326,6 +286,12 @@ def force_upload_folder(
     local_files = _list_local(local_dir)
     events: List[SyncEvent] = []
 
+    # Sibling context only needs the folder shape (which rel paths share a
+    # parent), not hashes -- skip hashing entirely here, consistent with
+    # force_upload's whole point of not bothering with the normal
+    # does-the-server-already-know-this check either.
+    sibling_map = folder_snapshot.siblings_by_rel({rel: {} for rel in local_files})
+
     def _emit(event: SyncEvent) -> None:
         events.append(event)
         if on_event:
@@ -336,7 +302,10 @@ def force_upload_folder(
 
     def _upload_one(local_path: Path) -> None:
         try:
-            client.upload_files([local_path])
+            rel = local_path.relative_to(local_dir).as_posix()
+            siblings = sibling_map.get(rel)
+            files_siblings = {local_path.name: siblings} if siblings else None
+            client.upload_files([local_path], sibling_map=files_siblings)
             _emit(SyncEvent("upload", local_path.name, ok=True, message="강제 업로드됨"))
         except (ApiError, OSError) as exc:
             _emit(SyncEvent("upload", local_path.name, ok=False, message=str(exc)))
@@ -390,9 +359,18 @@ def run_sync(
             message="같은 경로에 내용이 다른 파일이 있어 건너뜀 (수동 확인 필요 -- 서버에 새 버전이 올라왔을 수 있습니다)",
         ))
 
+    for old_rel, new_rel in plan.moved:
+        _emit(SyncEvent(
+            "moved", new_rel, ok=True,
+            message=f"로컬에서 이동/이름변경 감지됨 (이전 경로: {old_rel}) -- 내용은 이미 서버에 반영되어 있어 별도 조치 없음",
+        ))
+
     def _upload_one(local_path: Path) -> None:
         try:
-            client.upload_files([local_path])
+            rel = local_path.relative_to(local_dir).as_posix()
+            siblings = plan.sibling_map.get(rel)
+            sibling_map = {local_path.name: siblings} if siblings else None
+            client.upload_files([local_path], sibling_map=sibling_map)
             _emit(SyncEvent("upload", local_path.name, ok=True, message="업로드됨 (분류 후 위치가 바뀔 수 있음)"))
         except (ApiError, OSError) as exc:
             _emit(SyncEvent("upload", local_path.name, ok=False, message=str(exc)))
