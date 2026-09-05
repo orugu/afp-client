@@ -60,6 +60,9 @@ class SyncPlan:
     # attached to uploads so the server's classify() call gets real local
     # folder context. See folder_snapshot.siblings_by_rel.
     sibling_map: Dict[str, List[str]] = field(default_factory=dict)
+    # rel_path -> local folder's own name, from the current snapshot --
+    # see folder_snapshot.folder_hint_by_rel.
+    folder_hint_map: Dict[str, str] = field(default_factory=dict)
 
     @property
     def is_empty(self) -> bool:
@@ -158,6 +161,7 @@ def diff_folder(
     structure_diff = folder_snapshot.diff_snapshots(previous_snapshot, current_snapshot)
     folder_snapshot.save_snapshot(local_dir, current_snapshot)
     sibling_map = folder_snapshot.siblings_by_rel(current_snapshot)
+    folder_hint_map = folder_snapshot.folder_hint_by_rel(current_snapshot)
 
     try:
         remote_entries = list_files_recursive(client, remote_path)
@@ -258,6 +262,7 @@ def diff_folder(
 
     plan.moved = structure_diff.moved
     plan.sibling_map = sibling_map
+    plan.folder_hint_map = folder_hint_map
     return plan
 
 
@@ -286,11 +291,13 @@ def force_upload_folder(
     local_files = _list_local(local_dir)
     events: List[SyncEvent] = []
 
-    # Sibling context only needs the folder shape (which rel paths share a
-    # parent), not hashes -- skip hashing entirely here, consistent with
-    # force_upload's whole point of not bothering with the normal
-    # does-the-server-already-know-this check either.
-    sibling_map = folder_snapshot.siblings_by_rel({rel: {} for rel in local_files})
+    # Sibling/folder-hint context only needs the folder shape (which rel
+    # paths share a parent), not hashes -- skip hashing entirely here,
+    # consistent with force_upload's whole point of not bothering with the
+    # normal does-the-server-already-know-this check either.
+    snapshot_shape = {rel: {} for rel in local_files}
+    sibling_map = folder_snapshot.siblings_by_rel(snapshot_shape)
+    folder_hint_map = folder_snapshot.folder_hint_by_rel(snapshot_shape)
 
     def _emit(event: SyncEvent) -> None:
         events.append(event)
@@ -304,8 +311,10 @@ def force_upload_folder(
         try:
             rel = local_path.relative_to(local_dir).as_posix()
             siblings = sibling_map.get(rel)
+            folder_hint = folder_hint_map.get(rel)
             files_siblings = {local_path.name: siblings} if siblings else None
-            client.upload_files([local_path], sibling_map=files_siblings)
+            files_hint = {local_path.name: folder_hint} if folder_hint else None
+            client.upload_files([local_path], sibling_map=files_siblings, folder_hint_map=files_hint)
             _emit(SyncEvent("upload", local_path.name, ok=True, message="강제 업로드됨"))
         except (ApiError, OSError) as exc:
             _emit(SyncEvent("upload", local_path.name, ok=False, message=str(exc)))
@@ -369,8 +378,10 @@ def run_sync(
         try:
             rel = local_path.relative_to(local_dir).as_posix()
             siblings = plan.sibling_map.get(rel)
+            folder_hint = plan.folder_hint_map.get(rel)
             sibling_map = {local_path.name: siblings} if siblings else None
-            client.upload_files([local_path], sibling_map=sibling_map)
+            folder_hint_map = {local_path.name: folder_hint} if folder_hint else None
+            client.upload_files([local_path], sibling_map=sibling_map, folder_hint_map=folder_hint_map)
             _emit(SyncEvent("upload", local_path.name, ok=True, message="업로드됨 (분류 후 위치가 바뀔 수 있음)"))
         except (ApiError, OSError) as exc:
             _emit(SyncEvent("upload", local_path.name, ok=False, message=str(exc)))

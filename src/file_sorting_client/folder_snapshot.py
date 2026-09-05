@@ -231,3 +231,35 @@ def siblings_by_rel(snapshot: Dict[str, dict]) -> Dict[str, List[str]]:
         name = Path(rel).name
         result[rel] = sorted(n for n in by_parent.get(parent, []) if n != name)
     return result
+
+
+# Local folder names that carry no real signal about project cohesion --
+# generic system/download folders every machine has, in several languages.
+# A file sitting directly in one of these (or at the sync root itself) gets
+# no folder_hint at all rather than a misleading one.
+_GENERIC_FOLDER_NAMES = {
+    "desktop", "downloads", "download", "documents", "document", "temp", "tmp",
+    "untitled", "new folder", "바탕화면", "다운로드", "문서", "새 폴더", "제목 없음",
+}
+
+
+def folder_hint_by_rel(snapshot: Dict[str, dict]) -> Dict[str, str]:
+    """rel_path -> the file's immediate local parent folder's own name, when
+    it looks like a real, user-chosen name rather than a generic system
+    folder or the sync root itself (parent == ""). A human-picked folder
+    name (e.g. "invoice_2024_project") is often the single best signal for
+    what to call a project -- see api.upload_files' folder_hint_map /
+    main.py's /api/files/upload `folder_hints` field / worker.py's
+    _resolve_local_folder_hint, which still runs its own atomicity check
+    before ever trusting this name for anything.
+    """
+    result: Dict[str, str] = {}
+    for rel in snapshot:
+        parent = Path(rel).parent
+        if str(parent) in ("", "."):
+            continue
+        name = parent.name
+        if name.strip().lower() in _GENERIC_FOLDER_NAMES:
+            continue
+        result[rel] = name
+    return result

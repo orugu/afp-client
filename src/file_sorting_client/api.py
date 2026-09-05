@@ -152,7 +152,10 @@ class FileSortingApiClient:
         return destination
 
     def upload_files(
-        self, paths: list[Path], sibling_map: dict[str, list[str]] | None = None
+        self,
+        paths: list[Path],
+        sibling_map: dict[str, list[str]] | None = None,
+        folder_hint_map: dict[str, str] | None = None,
     ) -> UploadResponse:
         """POSTs one or more local files to /files/upload for the server's
         worker to pick up from watch_dir. httpx.Client is safe to reuse
@@ -162,11 +165,15 @@ class FileSortingApiClient:
 
         sibling_map: optional {filename: [local folder-mate filenames]},
         keyed by each path's own .name -- see folder_snapshot.siblings_by_rel.
-        Sent as an extra form field so the server's very first classify()
-        call for a new file can see real local folder context (previously
-        only its own re-review pass ever had this). An older server that
-        doesn't recognize the field just ignores it; omit sibling_map
-        entirely (default) to upload exactly as before.
+        folder_hint_map: optional {filename: local folder name}, same keying
+        -- see folder_snapshot.folder_hint_by_rel. Both sent as extra form
+        fields so the server's very first classify() call for a new file
+        can see real local folder context (previously only its own
+        re-review pass ever had this) and, when the server's own
+        folder-atomicity check agrees, a real human-chosen project name
+        instead of none at all. An older server that doesn't recognize
+        either field just ignores it; omit both (default) to upload exactly
+        as before.
         """
         files = []
         opened = []
@@ -180,6 +187,10 @@ class FileSortingApiClient:
                 relevant = {p.name: sibling_map[p.name] for p in paths if sibling_map.get(p.name)}
                 if relevant:
                     data["siblings"] = json.dumps(relevant)
+            if folder_hint_map:
+                relevant_hints = {p.name: folder_hint_map[p.name] for p in paths if folder_hint_map.get(p.name)}
+                if relevant_hints:
+                    data["folder_hints"] = json.dumps(relevant_hints)
             return UploadResponse.model_validate(
                 self._request("POST", "/files/upload", files=files, data=data)
             )
